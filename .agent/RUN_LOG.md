@@ -6,8 +6,8 @@
 |---|---|---|
 | S1 | Rulesets unavailable on private repo, free personal account | `POST /rulesets` → 403 *"Upgrade to GitHub Pro or make this repository public"*. Repo made public with consent. |
 | S2 | Git credential helper pushed as the wrong identity | HTTPS remote authenticated as `iyc-central`, not `telember` → 403. Fixed by using the SSH remote. |
-| S3 | Ruleset blocks creation of its own target branch | `do_not_enforce_on_create: false` (same as PMS) rejects the initial `main` push. Seed with enforcement disabled, then re-enable. |
-| S4 | Unquoted `PMS: 431s` in a step name broke the whole workflow | YAML reads colon-space as a mapping. Startup failure, **zero jobs, no logs** — the run shows the file *path* instead of the workflow name. Caught only by `actionlint`, not by `yaml.safe_load` of the other file. |
+| S3 | Ruleset blocks creation of its own target branch | `do_not_enforce_on_create: false` (same as test-app) rejects the initial `main` push. Seed with enforcement disabled, then re-enable. |
+| S4 | Unquoted `test-app: 431s` in a step name broke the whole workflow | YAML reads colon-space as a mapping. Startup failure, **zero jobs, no logs** — the run shows the file *path* instead of the workflow name. Caught only by `actionlint`, not by `yaml.safe_load` of the other file. |
 | S5 | `inputs` context is invalid outside `workflow_dispatch` | `${{ inputs.x }}` in a job `env:` causes a startup failure on `push`/`pull_request`. Use `${{ github.event.inputs.x }}`. |
 
 ## Process correction
@@ -28,7 +28,7 @@ Independent reviewer (fresh context) returned 2xP0 and 7xP1. Fixed in `7d25ad7`:
 |---|---|---|
 | P0 | Fork PRs can never receive the status; a fork run also burns the single-flight slot with a read-only token | Job-level `if` restricts to same-repo events; sweep filters to same-repo heads |
 | P0 | `base: 'main'` filter meant PRs on any other base never got a status at all | Sweep lists **every** open PR; non-main bases get `success` / "not queued — base is X" |
-| P1 | **`checks: read` missing.** Public lab masks it; on private ms-pms-app every sweep 403s, fails open, and silently orders nothing | Added to `permissions` |
+| P1 | **`checks: read` missing.** Public lab masks it; on private test-app every sweep 403s, fails open, and silently orders nothing | Added to `permissions` |
 | P1 | Eject measured `committer.date` — the commit's age, not time at the front. Would mass-eject the whole backlog, each eject firing the next sweep | Eject on the `created_at` of the PR's own `ready to merge next` status, and only when `behind_by === 0` |
 | P1 | Eject label was never removed, so "push to rejoin" did not work and an ejected PR was excluded forever | Eject comment carries `<!-- merge-train-eject sha=... -->`; label is dropped once the head SHA differs |
 | P1 | **"gates running -> success" let a PR merge out of turn** the moment its gates went green | Split durable vs transitional blocks. Durable (draft/conflict/ejected/other base) -> `success`; transitional (gates running, threads open, mergeability unknown) -> `pending` |
@@ -78,7 +78,7 @@ on the new SHA never runs, and with the context required the pull request is stu
 The `if: always()` backstop does **not** save this: the backstop is a step inside the very run that
 is waiting for approval. A backstop can only cover failures of a run that actually starts.
 
-**Consequence for ms-pms-app.** The GitHub App token is not an optimisation, it is a prerequisite —
+**Consequence for test-app.** The GitHub App token is not an optimisation, it is a prerequisite —
 which is exactly what `pr-auto-update-branch.yml` already says in its own header comment. The design
 doc was wrong to treat it as optional.
 
@@ -106,10 +106,10 @@ down. Not designed; it falls out of measuring the clock from the status the trai
 Ten of eleven cases pass. The mechanism is proven: a green, up-to-date pull request was refused
 solely because it was second in line.
 
-**Blocked on one prerequisite before ms-pms-app.** `update-branch` under `GITHUB_TOKEN` strands the
+**Blocked on one prerequisite before test-app.** `update-branch` under `GITHUB_TOKEN` strands the
 head with no status. It must run under the Release GitHub App token — which is exactly what
 `pr-auto-update-branch.yml` already does, and says so in its own header comment.
 
 Two things this lab structurally cannot verify, both requiring a private repo:
 - the missing `checks: read` class of bug (public-repo check reads succeed on metadata alone);
-- the GITHUB_TOKEN API budget under real PMS volume.
+- the GITHUB_TOKEN API budget under real test-app volume.

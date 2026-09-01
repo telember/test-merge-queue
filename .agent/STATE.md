@@ -1,8 +1,8 @@
 # STATE
 
-**Task** — verify the ms-pms-app merge train mechanism in an isolated lab.
+**Task** — verify the test-app merge train mechanism in an isolated lab.
 **Risk** — MEDIUM. Throwaway public repo, no secrets, no production surface. The *logic*
-being validated is destined for ms-pms-app, so correctness of the sweep matters.
+being validated is destined for test-app, so correctness of the sweep matters.
 
 ## Decisions
 
@@ -10,7 +10,7 @@ being validated is destined for ms-pms-app, so correctness of the sweep matters.
   repo under a free personal account (verified: HTTP 403 on ruleset POST).
 - Gates are mocked at ~10x speed, keeping the fast/slow spread that causes starvation.
 - `GITHUB_TOKEN` instead of a GitHub App: this lab measures whether `update-branch` under
-  `GITHUB_TOKEN` re-triggers gates. PMS uses an App token specifically because it does not.
+  `GITHUB_TOKEN` re-triggers gates. test-app uses an App token specifically because it does not.
 
 ## Status
 
