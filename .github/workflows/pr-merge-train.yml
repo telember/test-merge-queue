@@ -12,8 +12,6 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed, labeled, unlabeled]
-  pull_request_review_thread:
-    types: [resolved, unresolved]
   schedule:
     - cron: '*/10 * * * *'
   workflow_dispatch:
