@@ -43,7 +43,7 @@ jobs:
       - uses: actions/github-script@v8
         env:
           EJECT_MINUTES: ${{ vars.MERGE_TRAIN_EJECT_MINUTES || '30' }}
-          SIMULATE_CRASH: ${{ inputs.simulate_crash }}
+          SIMULATE_CRASH: ${{ github.event.inputs.simulate_crash }}
         with:
           script: |
             const OWNER = context.repo.owner, REPO = context.repo.repo;
