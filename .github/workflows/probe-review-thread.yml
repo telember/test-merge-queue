@@ -1,0 +1,10 @@
+name: Probe review-thread
+on:
+  pull_request_review_thread:
+    types: [resolved, unresolved]
+permissions: {contents: read}
+jobs:
+  p:
+    if: false
+    runs-on: ubuntu-latest
+    steps: [{run: "echo probe"}]
