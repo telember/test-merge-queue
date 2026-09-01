@@ -96,6 +96,24 @@ jobs:
               return data;
             }
 
+            // The train still never merges. It arms GitHub's native auto-merge so
+            // the merge happens the instant every required context is green —
+            // including Queue position flipping when it is this PR's turn.
+            async function armAutoMerge(pr) {
+              try {
+                await github.graphql(
+                  `mutation($id:ID!){enablePullRequestAutoMerge(
+                     input:{pullRequestId:$id, mergeMethod:SQUASH}){clientMutationId}}`,
+                  { id: pr.node_id });
+                log.push(`#${pr.number} auto-merge armed`);
+              } catch (e) {
+                // already enabled, or the PR is already clean — both are fine
+                const m = e.message || '';
+                if (!/already enabled|clean status/i.test(m))
+                  log.push(`#${pr.number} auto-merge not armed (${m.slice(0, 60)})`);
+              }
+            }
+
             async function classify(pr, comb) {
               if (pr.base.ref !== 'main') return { why: `base is ${pr.base.ref}`, durable: true };
               if (pr.draft) return { why: 'draft', durable: true };
@@ -171,6 +189,7 @@ jobs:
                     log.push(`#${pr.number} re-admitted (pushed since eject)`);
                   }
                 }
+                if (!pr.draft) await armAutoMerge(pr);
                 state.set(pr.number, { comb, existing, ...(await classify(pr, comb)) });
               }
 
