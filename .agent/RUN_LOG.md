@@ -86,3 +86,30 @@ doc was wrong to treat it as optional.
 *inside* a sweep. A sweep that never starts posts nothing. The only real mitigations are: never let
 the train mutate the head's SHA under a token whose commits cannot re-trigger workflows, and keep the
 kill switch documented.
+
+## Verification round 2 — complete
+
+| # | Case | Result |
+|---|---|---|
+| V8  | Promotion after a merge | PARTIAL — works, but needed the blocked runs approved by hand |
+| V9  | Fail-open under a forced crash | PASS — both PRs -> `success` / "train unavailable", job conclusion `failure`, next sweep restored the ordering exactly |
+| V10 | Eject after the timeout | PASS — label, comment with SHA marker, `#3` promoted in the same sweep, and the ejected PR **kept `success`** |
+| V11 | Push to rejoin after an eject | PASS — `pull_request` sweep removed the label and returned `#2` to the line |
+
+Unplanned observation from V9: the forced crash rewrote the head status with a different
+description, which reset the `created_at` that the head-since clock reads — so the first eject
+attempt correctly did nothing. A pull request is not charged for time spent while the train was
+down. Not designed; it falls out of measuring the clock from the status the train itself writes.
+
+## Final state: NEEDS_HUMAN_REVIEW
+
+Ten of eleven cases pass. The mechanism is proven: a green, up-to-date pull request was refused
+solely because it was second in line.
+
+**Blocked on one prerequisite before ms-pms-app.** `update-branch` under `GITHUB_TOKEN` strands the
+head with no status. It must run under the Release GitHub App token — which is exactly what
+`pr-auto-update-branch.yml` already does, and says so in its own header comment.
+
+Two things this lab structurally cannot verify, both requiring a private repo:
+- the missing `checks: read` class of bug (public-repo check reads succeed on metadata alone);
+- the GITHUB_TOKEN API budget under real PMS volume.
