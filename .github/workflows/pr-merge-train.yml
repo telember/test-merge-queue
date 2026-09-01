@@ -1,0 +1,181 @@
+name: Merge Train
+
+# Elects ONE pull request at a time and publishes whose turn it is as a commit
+# status. It never merges, never force-pushes, never bypasses a rule.
+#
+# Governing rule: the train may DELAY a merge, never permanently prevent one.
+# Every failure path ends with every open PR holding `success`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed, labeled, unlabeled]
+  pull_request_review_thread:
+    types: [resolved, unresolved]
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      simulate_crash:
+        description: 'Force the sweep to throw, to prove it fails open'
+        type: boolean
+        default: false
+
+# Single-flight. NOT cancel-in-progress: a cancelled sweep can leave some PRs
+# without a status, and a missing required context reads as pending forever.
+concurrency:
+  group: merge-train
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # update-branch
+  pull-requests: write   # labels + comments
+  statuses: write        # the Queue position status
+  issues: write          # comments go through the issues API
+
+jobs:
+  sweep:
+    name: Merge train sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        env:
+          EJECT_MINUTES: ${{ vars.MERGE_TRAIN_EJECT_MINUTES || '30' }}
+          SIMULATE_CRASH: ${{ inputs.simulate_crash }}
+        with:
+          script: |
+            const OWNER = context.repo.owner, REPO = context.repo.repo;
+            const CONTEXT = 'Queue position';
+            const LABEL = 'queue-ejected';
+            const EJECT_MINUTES = Number(process.env.EJECT_MINUTES || 30);
+            const q = { owner: OWNER, repo: REPO };
+
+            const listOpen = () => github.paginate(github.rest.pulls.list,
+              { ...q, state: 'open', base: 'main', per_page: 100 });
+
+            const setStatus = (pr, state, description) =>
+              github.rest.repos.createCommitStatus({
+                ...q, sha: pr.head.sha, state, context: CONTEXT,
+                description: String(description).slice(0, 140),
+              });
+
+            const ordinal = n =>
+              n + ['th','st','nd','rd'][(n % 100 > 10 && n % 100 < 14) ? 0 : Math.min(n % 10, 4) % 4];
+
+            // ── why a PR is not in the line (null = it IS eligible) ──────────
+            async function ineligibleReason(pr) {
+              if (pr.draft) return 'draft';
+              if ((pr.labels || []).some(l => l.name === LABEL)) return 'ejected';
+
+              const { data: full } = await github.rest.pulls.get({ ...q, pull_number: pr.number });
+              if (full.mergeable_state === 'dirty') return 'conflict';
+
+              // Gates: every check run and commit status EXCEPT our own.
+              const { data: cr } = await github.rest.checks.listForRef({ ...q, ref: pr.head.sha, per_page: 100 });
+              const runs = cr.check_runs.filter(r => r.name !== CONTEXT);
+              if (runs.length === 0) return 'gates not started';
+              if (runs.some(r => r.status !== 'completed')) return 'gates running';
+              if (runs.some(r => !['success','neutral','skipped'].includes(r.conclusion))) return 'gates not green';
+
+              const { data: st } = await github.rest.repos.listCommitStatusesForRef({ ...q, ref: pr.head.sha, per_page: 100 });
+              const latest = new Map();
+              for (const s of st) if (!latest.has(s.context)) latest.set(s.context, s.state);
+              for (const [ctx, state] of latest)
+                if (ctx !== CONTEXT && state !== 'success') return 'gates not green';
+
+              const gql = await github.graphql(
+                `query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){
+                   pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved}}}}}`,
+                { o: OWNER, r: REPO, n: pr.number });
+              const threads = gql.repository.pullRequest.reviewThreads.nodes;
+              if (threads.some(t => !t.isResolved)) return 'threads open';
+
+              return null;
+            }
+
+            async function eject(pr, why) {
+              await github.rest.issues.addLabels({ ...q, issue_number: pr.number, labels: [LABEL] })
+                .catch(async () => {
+                  await github.rest.issues.createLabel({ ...q, name: LABEL, color: 'B60205',
+                    description: 'Lost its place in the merge queue' }).catch(() => {});
+                  await github.rest.issues.addLabels({ ...q, issue_number: pr.number, labels: [LABEL] });
+                });
+              await github.rest.issues.createComment({ ...q, issue_number: pr.number,
+                body: `**Merge train:** lost its place in the line — ${why}.\n\n` +
+                      `The next pull request has moved to the front. Push any commit to rejoin the line.` });
+              await setStatus(pr, 'success', `ejected — ${why}`);
+              core.notice(`ejected #${pr.number}: ${why}`);
+            }
+
+            // ── the sweep ───────────────────────────────────────────────────
+            const log = [];
+            try {
+              if (process.env.SIMULATE_CRASH === 'true')
+                throw new Error('simulated crash (workflow_dispatch)');
+
+              const open = await listOpen();
+              const reasons = new Map();
+              for (const pr of open) reasons.set(pr.number, await ineligibleReason(pr));
+
+              // ONE sorted list is the queue. Position is just the index.
+              const queue = open
+                .filter(pr => reasons.get(pr.number) === null)
+                .sort((a, b) => a.number - b.number);
+              const head = queue[0];
+
+              // Every open PR gets a status, every run.
+              for (const pr of open) {
+                const why = reasons.get(pr.number);
+                if (head && pr.number === head.number) {
+                  await setStatus(pr, 'success', 'ready to merge next');
+                  log.push(`#${pr.number} HEAD  ready to merge next`);
+                } else if (why === null) {
+                  const place = ordinal(queue.findIndex(p => p.number === pr.number) + 1);
+                  await setStatus(pr, 'pending', `waiting — ${place} in line, behind #${head.number}`);
+                  log.push(`#${pr.number} wait  ${place} in line`);
+                } else {
+                  await setStatus(pr, 'success', `not queued — ${why}`);
+                  log.push(`#${pr.number} skip  not queued — ${why}`);
+                }
+              }
+
+              if (!head) {
+                core.notice('no eligible PR — nothing ordered, nobody blocked');
+              } else {
+                const { data: headCommit } = await github.rest.repos.getCommit({ ...q, ref: head.head.sha });
+                const ageMin = (Date.now() - new Date(headCommit.commit.committer.date)) / 60000;
+
+                if (ageMin > EJECT_MINUTES) {
+                  await eject(head, `held the front for over ${EJECT_MINUTES} min`);
+                } else {
+                  // compare by SHA — a branch name containing "/" 404s
+                  const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
+                    ...q, basehead: `main...${head.head.sha}` });
+                  log.push(`#${head.number} behind_by=${cmp.behind_by}`);
+                  if (cmp.behind_by > 0) {
+                    try {
+                      await github.rest.pulls.updateBranch({ ...q, pull_number: head.number });
+                      log.push(`#${head.number} update-branch requested`);
+                    } catch (e) {
+                      if (e.status === 422) await eject(head, 'merge conflict');
+                      else throw e;
+                    }
+                  }
+                }
+              }
+            } catch (err) {
+              // FAIL OPEN. Never leave a required context unposted.
+              core.error(`sweep failed, failing open: ${err.message}`);
+              for (const pr of await listOpen().catch(() => []))
+                await setStatus(pr, 'success', 'train unavailable').catch(() => {});
+              log.push(`FAILED OPEN: ${err.message}`);
+              await core.summary.addHeading('Merge train — FAILED OPEN', 3)
+                .addRaw(`\`${err.message}\``).addCodeBlock(log.join('\n')).write();
+              core.setFailed(err.message);
+              return;
+            }
+
+            await core.summary.addHeading('Merge train sweep', 3)
+              .addCodeBlock(log.join('\n') || 'no open pull requests').write();

@@ -1,0 +1,92 @@
+name: Mock Gates
+
+# Mirrors the SHAPE of ms-pms-app's required checks: several independently-named
+# gates with a wide duration spread, so the fast-gate / slow-gate race that
+# starved PR #4645 is reproducible here. Durations are scaled down ~10x.
+#
+# Set MOCK_FAIL=<job key> in the PR body to make that gate fail on purpose.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: mock-gates-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Web Frontend CI Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Simulate the long-pole gate (PMS: 431s)
+        run: |
+          if grep -qi 'MOCK_FAIL=frontend' <<< "${BODY}"; then
+            echo "::error::mock frontend failure requested"; exit 1
+          fi
+          sleep 45
+          echo "frontend gate ok"
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+
+  core:
+    name: Web core-service CI Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Simulate core-service gate (PMS: 245s)
+        run: |
+          if grep -qi 'MOCK_FAIL=core' <<< "${BODY}"; then
+            echo "::error::mock core failure requested"; exit 1
+          fi
+          sleep 25
+          echo "core gate ok"
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+
+  contract:
+    name: Contract gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Simulate contract gate (PMS: 265s)
+        run: |
+          if grep -qi 'MOCK_FAIL=contract' <<< "${BODY}"; then
+            echo "::error::mock contract failure requested"; exit 1
+          fi
+          sleep 20
+          echo "contract gate ok"
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+
+  security:
+    name: Security Scan (Gitleaks + Dependency audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Simulate security scan (PMS: 264s)
+        run: |
+          if grep -qi 'MOCK_FAIL=security' <<< "${BODY}"; then
+            echo "::error::mock security failure requested"; exit 1
+          fi
+          sleep 10
+          echo "security scan ok"
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+
+  guards:
+    name: Forbid nested .claude directories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Fast structural guard
+        run: |
+          nested="$(git ls-files | grep -E '/\.claude/' || true)"
+          if [ -n "$nested" ]; then echo "::error::nested .claude"; exit 1; fi
+          echo "guards ok"
