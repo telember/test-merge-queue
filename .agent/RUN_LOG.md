@@ -46,3 +46,43 @@ green gates and can merge out of turn. Transitional states must be `pending`.
 
 `pull_request_review_thread` cannot be used to close that gap: GitHub rejects the workflow file
 outright (verified — startup failure, zero jobs, run displays the file path instead of the name).
+
+## Verification round 1 — results
+
+| # | Case | Result |
+|---|---|---|
+| V1 | Three PRs opened from the *same* `main` tip | All held; no simultaneous merge |
+| V2 | Gates still running | `pending` / "waiting — gates running" |
+| V3 | Head election, lowest number wins | `#1` `success` / "ready to merge next" |
+| V4 | Ordinal positions | `#2` "2nd in line, behind #1", `#3` "3rd in line, behind #1" |
+| V5 | **Out-of-turn merge blocked** | `#2` refused: *"the base branch policy prohibits the merge"* |
+| V6 | Head merges normally | `#1` merged |
+| V7 | **`update-branch` under `GITHUB_TOKEN`** | **FAILED — see below** |
+
+## P0 reproduced in the lab: update-branch under GITHUB_TOKEN strands the head
+
+Sequence, from real timestamps:
+
+```
+14:01:22  #1 merged
+14:01:25  push sweep elects #2, calls update-branch
+14:01:59  new SHA 5fbc7b1c; Mock Gates AND Merge Train both -> action_required
+          Queue position on 5fbc7b1c: NONE
+          mergeable_state: blocked
+```
+
+The merge commit `update-branch` creates is authored by `github-actions[bot]`, and the runs it
+triggers land in `action_required` awaiting approval. So the sweep that would post `Queue position`
+on the new SHA never runs, and with the context required the pull request is stuck.
+
+The `if: always()` backstop does **not** save this: the backstop is a step inside the very run that
+is waiting for approval. A backstop can only cover failures of a run that actually starts.
+
+**Consequence for ms-pms-app.** The GitHub App token is not an optimisation, it is a prerequisite —
+which is exactly what `pr-auto-update-branch.yml` already says in its own header comment. The design
+doc was wrong to treat it as optional.
+
+**Consequence for the design.** "Every failure path ends in `success`" is only true for failures
+*inside* a sweep. A sweep that never starts posts nothing. The only real mitigations are: never let
+the train mutate the head's SHA under a token whose commits cannot re-trigger workflows, and keep the
+kill switch documented.
