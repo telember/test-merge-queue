@@ -119,7 +119,14 @@ jobs:
               if (pr.draft) return { why: 'draft', durable: true };
               if ((pr.labels || []).some(l => l.name === LABEL)) return { why: 'ejected', durable: true };
 
-              const { data: full } = await github.rest.pulls.get({ ...q, pull_number: pr.number });
+              // B2: GitHub computes `mergeable` lazily. Judging on the first null
+              // drops the PR out of the queue and hands the front to a newer one.
+              let full = null;
+              for (let i = 0; i < 4; i++) {
+                ({ data: full } = await github.rest.pulls.get({ ...q, pull_number: pr.number }));
+                if (full.mergeable !== null) break;
+                await new Promise(r => setTimeout(r, 1500));
+              }
               if (full.mergeable_state === 'dirty') return { why: 'conflict', durable: true };
               if (full.mergeable === null) return { why: 'mergeability unknown', durable: false };
 
@@ -190,12 +197,33 @@ jobs:
                   }
                 }
                 if (!pr.draft) await armAutoMerge(pr);
-                state.set(pr.number, { comb, existing, ...(await classify(pr, comb)) });
+                const cls = await classify(pr, comb);
+                state.set(pr.number, { comb, existing, ...cls,
+                  // does this PR already hold the front?
+                  wasHead: !!existing && existing.state === 'success'
+                           && existing.description === HEAD_DESC });
               }
 
-              const queue = open.filter(p => state.get(p.number).why === null)
-                                .sort((a, b) => a.number - b.number);
-              const head = queue[0];
+              const eligible = open.filter(p => state.get(p.number).why === null)
+                                   .sort((a, b) => a.number - b.number);
+
+              // B1 HEAD STICKINESS. Updating the head's branch restarts its gates,
+              // which previously made it ineligible and handed the front to a NEWER
+              // pull request — the exact starvation this workflow exists to stop.
+              // A PR that already holds the front keeps it unless it is DURABLY
+              // blocked (draft, conflict, ejected, red gates, wrong base).
+              const durablyBlocked = pr => {
+                const st = state.get(pr.number);
+                return st.why !== null && st.durable;
+              };
+              const sticky = open.find(pr => state.get(pr.number).wasHead && !durablyBlocked(pr));
+              const head = sticky || eligible[0];
+              if (sticky) log.push(`#${sticky.number} keeps the front (sticky)`);
+
+              // Numbering: the head first, then everyone else eligible, by number.
+              const queue = head
+                ? [head, ...eligible.filter(p => p.number !== head.number)]
+                : [];
 
               for (const pr of open) {
                 const st = state.get(pr.number);
@@ -236,6 +264,19 @@ jobs:
                     await github.rest.pulls.updateBranch({
                       ...q, pull_number: head.number, expected_head_sha: head.head.sha });
                     log.push(`#${head.number} update-branch requested`);
+                    // B3: the new SHA has no status of its own. Stamp it immediately so
+                    // the head never sits on a status-less commit, and so its position
+                    // survives the gate restart without waiting for the next sweep.
+                    for (let i = 0; i < 5; i++) {
+                      await new Promise(r => setTimeout(r, 2000));
+                      const { data: fresh } = await github.rest.pulls.get({ ...q, pull_number: head.number });
+                      if (fresh.head.sha !== head.head.sha) {
+                        await github.rest.repos.createCommitStatus({ ...q, sha: fresh.head.sha,
+                          state: 'success', context: CONTEXT, description: HEAD_DESC });
+                        log.push(`#${head.number} front carried to ${fresh.head.sha.slice(0, 9)}`);
+                        break;
+                      }
+                    }
                   } catch (e) {
                     const msg = e.response?.data?.message ?? e.message ?? '';
                     if (e.status === 422 && /conflict/i.test(msg)) {
