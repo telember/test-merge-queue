@@ -128,12 +128,16 @@ jobs:
                 await new Promise(r => setTimeout(r, 1500));
               }
               if (full.mergeable_state === 'dirty') return { why: 'conflict', durable: true };
-              if (full.mergeable === null) return { why: 'mergeability unknown', durable: false };
+              if (full.mergeable === null) return { why: 'mergeability unknown', notYet: true };
 
               const cr = await github.paginate(github.rest.checks.listForRef,
                 { ...q, ref: pr.head.sha, per_page: 100 });
-              if (cr.length === 0) return { why: 'gates not started', durable: false };
-              if (cr.some(r => r.status !== 'completed')) return { why: 'gates running', durable: false };
+              // NOT-YET states keep their place in the line. Only DURABLE blocks
+              // (red, conflict, draft, ejected, wrong base) drop a PR out of it.
+              // Gates finish out of order, so excluding a still-running PR made the
+              // queue order by "whoever went green first" instead of by PR number.
+              if (cr.length === 0) return { why: 'gates not started', notYet: true };
+              if (cr.some(r => r.status !== 'completed')) return { why: 'gates running', notYet: true };
               if (cr.some(r => !['success','neutral','skipped'].includes(r.conclusion)))
                 return { why: 'gates not green', durable: true };
 
@@ -149,7 +153,7 @@ jobs:
                 { o: OWNER, r: REPO, n: pr.number });
               const t = g.repository.pullRequest.reviewThreads;
               if (t.totalCount > 100 || t.nodes.some(x => !x.isResolved))
-                return { why: 'threads open', durable: false };
+                return { why: 'threads open', notYet: true };
 
               return { why: null, durable: true };
             }
@@ -198,40 +202,15 @@ jobs:
                 }
                 if (!pr.draft) await armAutoMerge(pr);
                 const cls = await classify(pr, comb);
-                state.set(pr.number, { comb, existing, ...cls,
-                  // does this PR already hold the front?
-                  wasHead: !!existing && existing.state === 'success'
-                           && existing.description === HEAD_DESC });
+                state.set(pr.number, { comb, existing, ...cls });
               }
 
-              const eligible = open.filter(p => state.get(p.number).why === null)
-                                   .sort((a, b) => a.number - b.number);
-
-              // B1 HEAD STICKINESS. Updating the head's branch restarts its gates,
-              // which previously made it ineligible and handed the front to a NEWER
-              // pull request — the exact starvation this workflow exists to stop.
-              // A PR that already holds the front keeps it unless it is DURABLY
-              // blocked (draft, conflict, ejected, red gates, wrong base).
-              const durablyBlocked = pr => {
-                const st = state.get(pr.number);
-                return st.why !== null && st.durable;
-              };
-              // Stickiness is NARROW on purpose. It exists only so a train-initiated
-              // update-branch (which restarts the head's gates) cannot hand the front
-              // to a NEWER pull request. It must never outrank a LOWER-numbered PR
-              // that is eligible — an earlier version did, and a one-second
-              // `mergeable: null` blip on the lower PR became a permanent inversion,
-              // because the sticky head then blocked the very re-election that would
-              // have corrected it.
-              const candidate = open.find(pr => state.get(pr.number).wasHead && !durablyBlocked(pr));
-              const lowestEligible = eligible[0];
-              const sticky = (candidate && (!lowestEligible || lowestEligible.number >= candidate.number))
-                ? candidate : null;
-              const head = sticky || lowestEligible;
-              if (sticky && sticky.number !== (lowestEligible && lowestEligible.number))
-                log.push(`#${sticky.number} keeps the front (gates restarting)`);
-              if (candidate && !sticky)
-                log.push(`#${candidate.number} yields the front to lower #${lowestEligible.number}`);
+              // The line is every PR that is not durably blocked, oldest number first.
+              // A PR that is merely NOT-YET-READY holds its place; its own pending
+              // gates are what stop it merging, and everyone behind it stays pending.
+              const inLine = open.filter(p => !state.get(p.number).durable)
+                                 .sort((a, b) => a.number - b.number);
+              const head = inLine[0];
 
               // Numbering: the head first, then everyone else eligible, by number.
               const queue = head
@@ -240,20 +219,23 @@ jobs:
 
               for (const pr of open) {
                 const st = state.get(pr.number);
-                if (head && pr.number === head.number) {
-                  st.written = await setStatus(pr, 'success', HEAD_DESC, st.existing);
-                  log.push(`#${pr.number} HEAD  ${HEAD_DESC}`);
-                } else if (st.why === null) {
-                  const place = ordinal(queue.findIndex(p => p.number === pr.number) + 1);
-                  await setStatus(pr, 'pending', `waiting — ${place} in line, behind #${head.number}`, st.existing);
-                  log.push(`#${pr.number} WAIT  ${place} in line`);
-                } else if (st.durable) {
+                if (st.durable) {
                   await setStatus(pr, 'success', `not queued — ${st.why}`, st.existing);
                   log.push(`#${pr.number} SKIP  not queued — ${st.why}`);
+                } else if (head && pr.number === head.number) {
+                  // Front of the line. `success` only when it is genuinely ready —
+                  // otherwise it holds the front on `pending` and nobody passes it.
+                  if (st.why === null) {
+                    st.written = await setStatus(pr, 'success', HEAD_DESC, st.existing);
+                    log.push(`#${pr.number} HEAD  ${HEAD_DESC}`);
+                  } else {
+                    st.written = await setStatus(pr, 'pending', `1st in line — ${st.why}`, st.existing);
+                    log.push(`#${pr.number} HEAD  1st in line — ${st.why}`);
+                  }
                 } else {
-                  // Transitional: pending, or a stale success lets it merge out of turn.
-                  await setStatus(pr, 'pending', `waiting — ${st.why}`, st.existing);
-                  log.push(`#${pr.number} HOLD  waiting — ${st.why}`);
+                  const place = ordinal(inLine.findIndex(p => p.number === pr.number) + 1);
+                  await setStatus(pr, 'pending', `waiting — ${place} in line, behind #${head.number}`, st.existing);
+                  log.push(`#${pr.number} WAIT  ${place} in line`);
                 }
               }
 
