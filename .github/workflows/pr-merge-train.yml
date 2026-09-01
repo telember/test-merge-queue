@@ -216,9 +216,22 @@ jobs:
                 const st = state.get(pr.number);
                 return st.why !== null && st.durable;
               };
-              const sticky = open.find(pr => state.get(pr.number).wasHead && !durablyBlocked(pr));
-              const head = sticky || eligible[0];
-              if (sticky) log.push(`#${sticky.number} keeps the front (sticky)`);
+              // Stickiness is NARROW on purpose. It exists only so a train-initiated
+              // update-branch (which restarts the head's gates) cannot hand the front
+              // to a NEWER pull request. It must never outrank a LOWER-numbered PR
+              // that is eligible — an earlier version did, and a one-second
+              // `mergeable: null` blip on the lower PR became a permanent inversion,
+              // because the sticky head then blocked the very re-election that would
+              // have corrected it.
+              const candidate = open.find(pr => state.get(pr.number).wasHead && !durablyBlocked(pr));
+              const lowestEligible = eligible[0];
+              const sticky = (candidate && (!lowestEligible || lowestEligible.number >= candidate.number))
+                ? candidate : null;
+              const head = sticky || lowestEligible;
+              if (sticky && sticky.number !== (lowestEligible && lowestEligible.number))
+                log.push(`#${sticky.number} keeps the front (gates restarting)`);
+              if (candidate && !sticky)
+                log.push(`#${candidate.number} yields the front to lower #${lowestEligible.number}`);
 
               // Numbering: the head first, then everyone else eligible, by number.
               const queue = head
