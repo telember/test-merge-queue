@@ -155,7 +155,7 @@ jobs:
               if (t.totalCount > 100 || t.nodes.some(x => !x.isResolved))
                 return { why: 'threads open', notYet: true };
 
-              return { why: null, durable: true };
+              return { why: null, durable: false };   // ready: in the line, at the front if lowest
             }
 
             async function eject(pr, why, existing) {
@@ -213,9 +213,6 @@ jobs:
               const head = inLine[0];
 
               // Numbering: the head first, then everyone else eligible, by number.
-              const queue = head
-                ? [head, ...eligible.filter(p => p.number !== head.number)]
-                : [];
 
               for (const pr of open) {
                 const st = state.get(pr.number);
