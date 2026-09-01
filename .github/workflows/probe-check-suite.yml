@@ -1,0 +1,10 @@
+name: Probe check-suite
+on:
+  check_suite:
+    types: [completed]
+permissions: {contents: read}
+jobs:
+  p:
+    if: false
+    runs-on: ubuntu-latest
+    steps: [{run: "echo probe"}]
