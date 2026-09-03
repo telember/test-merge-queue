@@ -1,0 +1,102 @@
+name: Head-Only Auto-Update
+
+# Rebases ONLY the oldest eligible PR, instead of every open PR.
+# Writes no status and no label - it cannot block anything. If this workflow
+# never runs, PRs simply stay behind main, exactly as if it did not exist.
+#
+# Eligibility, in order:
+#   auto-merge on        - the author's "I am ready" signal
+#   not draft            - durable block
+#   not CONFLICTING      - durable block. NOTE: != CONFLICTING, never == MERGEABLE,
+#                          because GitHub returns UNKNOWN while it recomputes.
+#   no failing check     - durable block. CheckRun uses .conclusion,
+#                          StatusContext uses .state - both must be checked.
+# A PR whose gates are merely still running KEEPS its place: dropping it would
+# order the queue by whoever went green first, which is what starves big PRs.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report the pick without calling update-branch'
+        type: boolean
+        default: true
+
+concurrency:
+  group: head-only-update
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  update-head:
+    runs-on: ubuntu-latest
+    env:
+      REPO: ${{ github.repository }}
+      DRY_RUN: ${{ github.event_name == 'push' || inputs.dry_run }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Pick the oldest eligible PR and report every verdict
+        run: |
+          set -euo pipefail
+
+          ALL=$(gh pr list --repo "${REPO}" --base main --state open --limit 100 \
+            --json number,isDraft,mergeable,autoMergeRequest,statusCheckRollup)
+
+          {
+            echo "### Head-only auto-update"
+            echo ""
+            echo "| PR | auto-merge | draft | mergeable | failing | running | verdict |"
+            echo "|---|---|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "${ALL}" | jq -r '.[]
+            | . as $p
+            | ([$p.statusCheckRollup[]? | select(.conclusion=="FAILURE" or .conclusion=="TIMED_OUT"
+                                              or .state=="FAILURE" or .state=="ERROR")] | length) as $fail
+            | ([$p.statusCheckRollup[]? | select(.status=="IN_PROGRESS" or .status=="QUEUED"
+                                              or .state=="PENDING")] | length) as $run
+            | (if   $p.autoMergeRequest == null then "skip - no auto-merge"
+               elif $p.isDraft                  then "skip - draft"
+               elif $p.mergeable == "CONFLICTING" then "skip - conflict"
+               elif $fail > 0                   then "skip - \($fail) failing"
+               elif $run  > 0                   then "IN LINE - gates running"
+               else                                  "IN LINE - green" end) as $v
+            | "| #\($p.number) | \($p.autoMergeRequest != null) | \($p.isDraft) | \($p.mergeable) | \($fail) | \($run) | \($v) |"' \
+            >> "$GITHUB_STEP_SUMMARY"
+
+          FRONT=$(echo "${ALL}" | jq -c '[.[]
+            | select(.autoMergeRequest != null)
+            | select(.isDraft | not)
+            | select(.mergeable != "CONFLICTING")
+            | select([.statusCheckRollup[]? | select(.conclusion=="FAILURE" or .conclusion=="TIMED_OUT"
+                                                  or .state=="FAILURE" or .state=="ERROR")] | length == 0)
+            ] | sort_by(.number) | .[0:1]')
+
+          COUNT=$(echo "${FRONT}" | jq 'length')
+          if [ "${COUNT}" -eq 0 ]; then
+            { echo ""; echo "**Front: none eligible - nothing to do.**"; } >> "$GITHUB_STEP_SUMMARY"
+            echo "no eligible PR"
+            exit 0
+          fi
+
+          NUM=$(echo "${FRONT}" | jq -r '.[0].number')
+          BEHIND=$(gh api "repos/${REPO}/compare/main...$(gh pr view "${NUM}" --repo "${REPO}" --json headRefName -q .headRefName)" --jq '.behind_by')
+
+          { echo ""; echo "**Front: #${NUM}** (behind_by=${BEHIND}, dry_run=${DRY_RUN})"; } >> "$GITHUB_STEP_SUMMARY"
+          echo "front=#${NUM} behind_by=${BEHIND}"
+
+          if [ "${BEHIND}" -eq 0 ]; then
+            echo "already up to date - no update needed"
+            exit 0
+          fi
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "DRY RUN - would call update-branch on #${NUM} and on no other PR"
+            exit 0
+          fi
+          gh api -X PUT "repos/${REPO}/pulls/${NUM}/update-branch" --silent
+          echo "update-branch called on #${NUM} only"
