@@ -1,0 +1,25 @@
+name: Inputs Probe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'probe'
+        type: boolean
+        default: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      JOB_LEVEL: ${{ inputs.dry_run == true }}
+    steps:
+      - name: show
+        env:
+          STEP_LEVEL: ${{ inputs.dry_run == true }}
+        run: |
+          echo "event=${{ github.event_name }}"
+          echo "JOB_LEVEL=${JOB_LEVEL}"
+          echo "STEP_LEVEL=${STEP_LEVEL}"
